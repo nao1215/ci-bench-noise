@@ -73,8 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq valgrind hyperfine >/dev/null
-          which perf > out/perf-path.txt 2>&1 || echo "no perf" > out/perf-path.txt
           mkdir -p out
+          which perf > out/perf-path.txt 2>&1 || echo "no perf" > out/perf-path.txt
           valgrind --version > out/valgrind-version.txt
           for side in base head; do
             for i in 1 2 3; do
