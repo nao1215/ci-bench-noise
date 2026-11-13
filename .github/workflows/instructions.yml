@@ -1,0 +1,108 @@
+name: Instructions
+
+# Counts the instructions the workload executes, instead of timing it, on
+# whatever CPU the hosted runner happens to be. Cachegrind simulates the
+# program, so it needs no hardware counter; perf needs one, and a virtual
+# machine may not expose it, which is recorded rather than treated as a
+# failure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slowdowns:
+        description: Comma-separated slowdown percentages
+        default: "0,2,5"
+      repeats:
+        description: Jobs per slowdown
+        default: "8"
+      label:
+        description: A name for this batch
+        default: instr
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          SLOWDOWNS: ${{ inputs.slowdowns }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          slows = [s.strip() for s in os.environ["SLOWDOWNS"].split(",") if s.strip()]
+          reps = int(os.environ["REPEATS"])
+          print("matrix=" + json.dumps({"include": [{"slowdown": s, "rep": r} for s in slows for r in range(1, reps + 1)]}))
+          PY
+
+  count:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: slowdown ${{ matrix.slowdown }}% / ${{ matrix.rep }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build base and head
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "$RUNNER_TEMP/base" .
+          echo "$SLOWDOWN" > slowdown.txt
+          go build -trimpath -o "$RUNNER_TEMP/head" .
+          git checkout -- slowdown.txt
+      - name: Count
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+          REP: ${{ matrix.rep }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq valgrind hyperfine >/dev/null
+          mkdir -p out
+          valgrind --version > out/valgrind-version.txt
+          for side in base head; do
+            for i in 1 2 3; do
+              # GOMAXPROCS=1: one thread, so the count does not depend on scheduling.
+              GOMAXPROCS=1 valgrind --tool=cachegrind --cache-sim=no \
+                --cachegrind-out-file=/dev/null "$RUNNER_TEMP/$side" 2> out/cg-$side-$i.txt >/dev/null
+              GOMAXPROCS=1 perf stat -x, -e instructions:u -o out/perf-$side-$i.txt "$RUNNER_TEMP/$side" >/dev/null 2>&1 \
+                || echo "perf failed: $?" > out/perf-$side-$i.txt
+            done
+          done
+          hyperfine -N --warmup 2 --runs 20 --export-json out/hyperfine.json \
+            -n base "$RUNNER_TEMP/base" -n head "$RUNNER_TEMP/head" >/dev/null
+          python3 - <<'PY' > out/machine.json
+          import json, os
+          info = {}
+          for line in open("/proc/cpuinfo"):
+              if ":" in line:
+                  k, v = [x.strip() for x in line.split(":", 1)]
+                  info.setdefault(k, v)
+          print(json.dumps({
+              "label": os.environ["LABEL"], "slowdown": float(os.environ["SLOWDOWN"]), "rep": int(os.environ["REP"]),
+              "cpu_model": info.get("model name"), "avx512f": "avx512f" in info.get("flags", "").split(),
+              "nproc": os.cpu_count(), "image": os.environ.get("ImageOS", "") + " " + os.environ.get("ImageVersion", ""),
+          }, indent=2))
+          PY
+          cat out/machine.json; grep -h "I *refs" out/cg-*.txt; cat out/perf-base-1.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: instr-${{ inputs.label }}-s${{ matrix.slowdown }}-r${{ matrix.rep }}
+          path: out/
+          retention-days: 90
