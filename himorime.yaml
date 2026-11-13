@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nao1215/himorime/main/schema/himorime.schema.json
+#
+# The same defaults and tolerances as the suites of the nao1215 CLIs
+# (himorime, jsonize, sqly, gup, ...), so the experiment measures the gate
+# those repositories actually use.
+version: "1"
+
+name: ci-bench-noise
+description: A fixed amount of sorting, scaled by slowdown.txt.
+
+build:
+  command: [go, build, -trimpath, -o, "${artifact}", .]
+
+defaults:
+  warmup: 2
+  runs: 20
+  metrics:
+    cpu: true
+    memory: true
+  regression:
+    confidence: 0.95
+    latency:
+      max_percent: 10
+      min_difference: 1ms
+    cpu_total:
+      max_percent: 15
+      min_difference: 2ms
+    peak_rss:
+      max_percent: 15
+      min_difference: 2MiB
+
+benchmarks:
+  - name: sort
+    commands:
+      work:
+        command: ["${artifact}"]
