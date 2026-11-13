@@ -123,6 +123,21 @@ jobs:
           echo "$SLOWDOWN" > slowdown.txt
           himorime run --quiet --format samples-csv --output out/sequential-head.csv himorime.yaml
           git checkout -- slowdown.txt
+      - name: Cross-check with hyperfine
+        # An independent measurer on the same runner, to catch a bug in
+        # himorime's measurement rather than in its verdict.
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq hyperfine >/dev/null
+          go build -trimpath -o "$RUNNER_TEMP/base" .
+          echo "$SLOWDOWN" > slowdown.txt
+          go build -trimpath -o "$RUNNER_TEMP/head" .
+          git checkout -- slowdown.txt
+          hyperfine --version > out/hyperfine-version.txt
+          hyperfine -N --warmup 2 --runs 20 --export-json out/hyperfine.json \
+            -n base "$RUNNER_TEMP/base" -n head "$RUNNER_TEMP/head"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

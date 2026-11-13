@@ -19,29 +19,28 @@ import (
 //go:embed slowdown.txt
 var slowdownText string
 
-// baseRounds is the number of rounds of the unchanged build. One round sorts
-// 200,000 numbers and sums a strided walk over them, about 20ms on a desktop.
-const baseRounds = 5
+// baseRounds is the number of rounds of the unchanged build. Every round is
+// the same: it sorts 20,000 numbers and sums a strided walk over them. A
+// slowdown adds whole rounds, one round per percent, so the work grows by
+// exactly the percentage (a partial round would sort fewer numbers, and
+// sorting does not scale linearly with the count).
+const baseRounds = 100
 
-const size = 200_000
+const size = 20_000
 
 func main() {
-	percent, err := strconv.ParseFloat(strings.TrimSpace(slowdownText), 64)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "slowdown.txt:", err)
+	percent, err := strconv.Atoi(strings.TrimSpace(slowdownText))
+	if err != nil || percent < 0 {
+		fmt.Fprintln(os.Stderr, "slowdown.txt: want a non-negative integer percentage")
 		os.Exit(2)
 	}
-	// Work is counted in units of 1/100 round, so 5% of 5 rounds is exact.
-	units := int(float64(baseRounds*100) * (1 + percent/100))
+	rounds := baseRounds + baseRounds*percent/100
 
 	data := make([]uint32, size)
 	var state uint32 = 2463534242
 	var sum uint64
-	for u := 0; u < units; u += 100 {
+	for range rounds {
 		n := size
-		if units-u < 100 {
-			n = size * (units - u) / 100
-		}
 		for i := range n {
 			// xorshift32: the same numbers in every run and every build.
 			state ^= state << 13
