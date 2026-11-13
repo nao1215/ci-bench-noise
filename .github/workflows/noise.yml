@@ -1,0 +1,131 @@
+name: Noise
+
+# Every job runs on a fresh GitHub-hosted runner and measures the same
+# workload twice:
+#
+# - interleaved: `himorime compare --against HEAD`, the way the nao1215 CLIs
+#   gate pull requests. The base is the commit, the head is the working tree
+#   with slowdown.txt set to the scenario's percentage. A slowdown of 0 is an
+#   A/A test: any regression it reports is a false alarm.
+# - sequential: `himorime run` on the base, then `himorime run` on the head,
+#   so a change of the machine during the job lands on one side only. The
+#   raw samples are kept and judged offline with the same statistic.
+#
+# The CPU model and the runner image are recorded with every job, because a
+# hosted runner is not always the same hardware.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slowdowns:
+        description: Comma-separated slowdown percentages (0 is an A/A test)
+        default: "0,5,10,20"
+      repeats:
+        description: Jobs per slowdown
+        default: "10"
+      label:
+        description: A name for this batch, stored with the results
+        default: batch
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          SLOWDOWNS: ${{ inputs.slowdowns }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          slows = [s.strip() for s in os.environ["SLOWDOWNS"].split(",") if s.strip()]
+          reps = int(os.environ["REPEATS"])
+          include = [{"slowdown": s, "rep": r} for s in slows for r in range(1, reps + 1)]
+          print("matrix=" + json.dumps({"include": include}))
+          PY
+
+  measure:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: slowdown ${{ matrix.slowdown }}% / ${{ matrix.rep }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: nao1215/setup-himorime@14aeeb3fe55ad42cf29ee0802d578820faac3897 # v0.1.2
+        with:
+          version: v0.5.3
+      - name: Record the machine
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+          REP: ${{ matrix.rep }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY' > out/machine.json
+          import json, os, platform, datetime
+          info = {}
+          for line in open("/proc/cpuinfo"):
+              if ":" in line:
+                  k, v = [x.strip() for x in line.split(":", 1)]
+                  if k in ("model name", "flags", "cpu MHz") and k not in info:
+                      info[k] = v
+          print(json.dumps({
+              "label": os.environ["LABEL"],
+              "slowdown": float(os.environ["SLOWDOWN"]),
+              "rep": int(os.environ["REP"]),
+              "started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "cpu_model": info.get("model name"),
+              "cpu_mhz": info.get("cpu MHz"),
+              "avx512f": "avx512f" in info.get("flags", "").split(),
+              "nproc": os.cpu_count(),
+              "kernel": platform.release(),
+              "image": os.environ.get("ImageOS", "") + " " + os.environ.get("ImageVersion", ""),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "job_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }, indent=2))
+          PY
+          cat out/machine.json
+      - name: Interleaved (himorime compare)
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+        run: |
+          set -euo pipefail
+          echo "$SLOWDOWN" > slowdown.txt
+          # Exit 1 is a reported regression, which is a result here, not a failure.
+          rc=0
+          himorime compare --against HEAD --quiet --format json --output out/interleaved.json \
+            --summary "$GITHUB_STEP_SUMMARY" himorime.yaml || rc=$?
+          echo "$rc" > out/interleaved-exit.txt
+          git checkout -- slowdown.txt
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then exit "$rc"; fi
+      - name: Sequential (base runs, then head runs)
+        env:
+          SLOWDOWN: ${{ matrix.slowdown }}
+        run: |
+          set -euo pipefail
+          himorime run --quiet --format samples-csv --output out/sequential-base.csv himorime.yaml
+          echo "$SLOWDOWN" > slowdown.txt
+          himorime run --quiet --format samples-csv --output out/sequential-head.csv himorime.yaml
+          git checkout -- slowdown.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: noise-${{ inputs.label }}-s${{ matrix.slowdown }}-r${{ matrix.rep }}
+          path: out/
+          retention-days: 90
