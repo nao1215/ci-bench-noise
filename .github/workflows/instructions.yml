@@ -73,6 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq valgrind hyperfine >/dev/null
+          which perf > out/perf-path.txt 2>&1 || echo "no perf" > out/perf-path.txt
           mkdir -p out
           valgrind --version > out/valgrind-version.txt
           for side in base head; do
@@ -80,8 +81,9 @@ jobs:
               # GOMAXPROCS=1: one thread, so the count does not depend on scheduling.
               GOMAXPROCS=1 valgrind --tool=cachegrind --cache-sim=no \
                 --cachegrind-out-file=/dev/null "$RUNNER_TEMP/$side" 2> out/cg-$side-$i.txt >/dev/null
-              GOMAXPROCS=1 perf stat -x, -e instructions:u -o out/perf-$side-$i.txt "$RUNNER_TEMP/$side" >/dev/null 2>&1 \
-                || echo "perf failed: $?" > out/perf-$side-$i.txt
+              # perf reads a hardware counter; keep its error, since a VM may not expose one.
+              sudo GOMAXPROCS=1 perf stat -x, -e instructions:u -o out/perf-$side-$i.txt "$RUNNER_TEMP/$side" \
+                >/dev/null 2> out/perf-$side-$i.err || echo "exit $?" >> out/perf-$side-$i.err
             done
           done
           hyperfine -N --warmup 2 --runs 20 --export-json out/hyperfine.json \
@@ -99,7 +101,7 @@ jobs:
               "nproc": os.cpu_count(), "image": os.environ.get("ImageOS", "") + " " + os.environ.get("ImageVersion", ""),
           }, indent=2))
           PY
-          cat out/machine.json; grep -h "I *refs" out/cg-*.txt; cat out/perf-base-1.txt
+          cat out/machine.json; grep -h "I *refs" out/cg-*.txt; cat out/perf-base-1.txt out/perf-base-1.err || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
